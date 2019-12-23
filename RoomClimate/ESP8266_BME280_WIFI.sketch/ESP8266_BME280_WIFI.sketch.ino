@@ -18,11 +18,10 @@ struct {
   uint32_t crc32;   // 4 bytes
   uint8_t channel;  // 1 byte,   5 in total
   uint8_t bssid[6]; // 6 bytes, 11 in total
-  uint8_t padding; // 12 bytes
-  //uint8_t ip[4];    // 4 bytes, 15 in total
-  //uint8_t netmask;  // 1 byte,  16 in total
-  //uint8_t dns_ip[4];// 4 bytes, 20 in total
-  //uint8_t gateway[4];// 4 bytes,24 in total
+  uint8_t padding; // 1 byte,   12 bytes in total
+  uint32_t ip;    // 4 bytes, 16 in total
+  uint32_t netmask;  // 4 byte,  20 in total
+  uint32_t gateway;// 4 bytes,24 in total
 } rtcData;
 
 uint8_t deviceMac[6];
@@ -46,9 +45,17 @@ void setup() {
 
   if (bmeStatus){
     bmeSensorValues values = readBmeValues();
-    
-    connectToWifi();
-    sendSensorValues(values);
+
+    bool networkSuccess = connectToWifi();
+    bool sensorValuesWritten = networkSuccess && sendSensorValues(values);
+
+    if (!sensorValuesWritten){
+      // if writing sensor values is not successful reset the saved wifi info
+      // in case this is causing the error. On the next run wifi is connected
+      // without reusing saved bssid, channel, ip, subnet e.t.c.
+      resetWifiInfos();
+      writeWifiInfoToRtc();
+    }
     disconnectWifi();
   }
 
@@ -106,11 +113,16 @@ void writeWifiInfoToRtc()
 {
   rtcData.channel = WiFi.channel();
   memcpy( rtcData.bssid, WiFi.BSSID(), 6 ); // Copy 6 bytes of BSSID (AP's MAC address)
+  
+  rtcData.ip = WiFi.localIP();
+  rtcData.netmask = WiFi.subnetMask();
+  rtcData.gateway = WiFi.gatewayIP();
+  
   rtcData.crc32 = calculateCRC32( ((uint8_t*)&rtcData) + 4, sizeof( rtcData ) - 4 );
   ESP.rtcUserMemoryWrite( 0, (uint32_t*)&rtcData, sizeof( rtcData ) );
 }
 
-void connectToWifi(){
+bool connectToWifi(){
   // Try to read WiFi settings and IPs from RTC memory
   bool rtcValid = readWifiInfoFromRtc();
   
@@ -123,6 +135,7 @@ void connectToWifi(){
   if (rtcValid == true)
   {
     Serial.println("Reusing connection info from rtc data");
+    WiFi.config(rtcData.ip, rtcData.gateway, rtcData.gateway, rtcData.netmask); /* use gateway as dns */
     WiFi.begin(WIFI_SSID, WIFI_PASSWD, rtcData.channel, rtcData.bssid, true);
   }
   else 
@@ -142,10 +155,7 @@ void connectToWifi(){
     if (retries == 20)
     {
       Serial.println("Could not connect to wifi. Resetting and trying again later.");
-      disconnectWifi();
-      resetWifiInfos();
-      goToDeepSleep();
-      return;
+      return false;
     }
     wifiStatus = WiFi.status();
     retries += 1;
@@ -170,14 +180,19 @@ void connectToWifi(){
 
   // Write current connection info back to RTC
   writeWifiInfoToRtc();
+
+  return true;
 }
 
-void sendSensorValues(bmeSensorValues values){
-  sendHttpRequest("/rest/items/temperature", values.temperature);
-  sendHttpRequest("/rest/items/humidity", values.humidity);
+bool sendSensorValues(bmeSensorValues values){
+  bool result = true;
+  result &= sendHttpRequest("/rest/items/temperature", values.temperature);
+  result &= sendHttpRequest("/rest/items/humidity", values.humidity);
+
+  return result;
 }
 
-void sendHttpRequest(char* baseUrl, float value){
+bool sendHttpRequest(char* baseUrl, float value){
   Serial.print("Try to send HTTP request to ");
   Serial.print(OPENHAB_SERVER);
   Serial.print(":");
@@ -213,10 +228,12 @@ void sendHttpRequest(char* baseUrl, float value){
     client.println();
     client.println(value, 1);
     client.println();
+    return true;
   } 
   else {
     Serial.println("Failed to send HTTP request.");
   }
+  return false;
 }
 
 void disconnectWifi(){
